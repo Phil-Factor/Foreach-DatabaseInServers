@@ -1,0 +1,239 @@
+﻿When A DBA uses PowerShell, it is often to perform a routine operation via SMO on  a number of databases on several servers or instances.  This applies to a whole range of tasks.  Just speaking for myself, I’ll be creating scripts for individual tables and routines, and I’d be doing entire build scripts. I’ll probably also be doing some sort of documentation, or cataloguing of what there is in each database, or maybe the individual database settings.  I’ll also be setting up a test run, or checking a status with a DMV. I might be doing checks to make sure that indexes weren’t duplicated, or that there was a primary key.   I might just be searching for a string, or checking to see which users had rights of access.  All these tasks require a PowerShell  SMO script that accesses all or some of the databases on all or some of my instances. 
+After a while, the scripts will seem horribly familiar.  It will probably consist of a pipeline that takes a list of servers, often the registered servers in my case,  and finds all the non-system databases. It will either pick databases from a list (a whitelist), find those with a pattern in the name,  or do every database that is not in a list (a blacklist). Then it will do things with each database.  All that really changes is the action you want to do with each database.  
+It always irritates me to have the same code in more than one place. You’ll really only want to write this once, and then reuse it. The only problem is how. 
+ If you are doing a long background job serially in PowerShell, it makes sense to do this in a pipeline, rather than creating potentially huge collections of large objects, because this is kinder to the memory management of .NET. Each server object is passed down the pipeline, each to have its collection of databases passed on, one at a time to be filtered and worked on.
+All you need to do is to inject the action you specify into the right part of the pipeline. To demonstrate how to do this with anonymous functions that we assign to  delegates, we’ll step  back slightly from the problem of accessing servers and their databases via SMO,  and we’ll forget any fancy stuff like functions. We’ll demonstrate a pipeline rather differently by creating a PowerShell script to generate the lyrics for ’Ten Green Bottles’.  Then, we’ll change it slightly without altering the pipeline itself in order to generate  ‘There were ten in the bed’. Believe me, this will help you understand the meaty stuff later on. 
+We’ll introduce a filter that decides the number less than, or equal to,  ten at which  to start the great poem. Then we’ll make the whole pipeline do something else without changing the code in the pipeline itself.
+#The basic sequence
+$Sequence="ten","nine","eight","seven","six","five","four","three","two","one"
+
+$StartAt='Ten' #The number we want to start at. Try it out with other values.
+
+$action={param ($x,$Isfirst); #the scriptblock called for every item in the list
+if (-not $Isfirst) {"there would be $x green bottles hanging on the wall."}
+@"
+
+There were $_ green bottles hanging on the wall, 
+$_ green bottles hanging on the wall
+and if one green bottle should accidentally fall
+"@
+}
+
+
+$Start={ "         $StartAt Green Bottles.`n"} #Scriptblock called at start 
+#and the one called after all items are processed
+$Finish={ "there would be no green bottles hanging on the wall`n`n    The End`n" } 
+#the scriptblock that decides whether the current item should be processed
+$Filter={ param ($x, $status); if ($x -eq $startAt) {$status = $true}; $status }
+
+#the actual pipeline. We will save the scriptblock literal in a variable which we can execute
+$pipeline={
+$Sequence|
+  & { BEGIN{$ShouldOutput = $false} PROCESS{$ShouldOutput = $filter.invoke( $_, $ShouldOutput); if ($shouldOutput) {$_}} }  |
+    & {BEGIN{$first=$true; $Start.invoke($_) } PROCESS{$action.invoke($_, $first); $first=$false} END{$Finish.invoke($_) } }
+}
+$pipeline.invoke() #and we just invoke the pipeline
+
+<# Now, we can change the poem to be ‘There were ten in the bed’ without touching the pipeline at all, but just changing the contents of the variables holding three of the four scriptblocks #>
+
+$action={param ($x,$Isfirst); #the scriptblock called for every item in the list
+if (-not $Isfirst) { "Single beds were only made for $x"}
+"`nThere were $x in the bed and the little one said,"
+if ($x -ne 'one') { @" 
+'Roll over, roll over!'.
+So they all rolled over and one fell out
+And he gave a little scream and he gave a little shout
+'Please remember to tie a knot in your pajamas'
+"@
+}
+else {for($ii = 1;$ii -le 3; $ii++) {"I've got the whole mattress to myself"}
+"I've got the mattress to myself."}
+}
+
+$Start={ "         There were $StartAt in the Bed.`n"} #Scriptblock called at start 
+#and the one called after all items are processed
+$Finish={ "`n`n    The End" }
+#and we then just call the pipeline again!
+$pipeline.invoke()
+What we’re actually doing is using delegates.  We are using those scriptblocks that we assign to variables as anonymous functions. We’re injecting functionality into the pipeline.  We haven’t changed the code of the pipeline itself.  
+PowerShell can be adapted very well to the sort of programming that works by injecting functionality into a pre-existing structure. It is, after all, a dynamic language.  In our case, this structure might be a pipeline that selects all your databases, one after another you and allows you to do what you need to each database.
+
+$DataSources | # our list of servers
+  & {PROCESS{$ServerFilter.invoke($_)}}  | # choose which servers from the list
+   Foreach-object {new-object ("$My.Server") $_ } | # create an SMO server object
+     Where-Object {$_.ServerType -ne $null} | # did you positively get the server?
+      Foreach-object {$_.Databases } | #for every server successfully reached 
+         Where-Object {$_.IsSystemObject -ne $true} | #not the system objects
+            & {PROCESS{$Databasefilter.invoke($_)}}  | # do all,avoid blacklist or do a whitelist etc
+              & {PROCESS{$JobToDo.invoke($_)}} #and do whatever you want for the database
+}
+
+
+This does  most routine tasks, but we need to add a few things, just as we had to with the poem.  The $filter is  a variable containing a scriptblock. It has a parameter, which is $_, meaning the current database object  in the pipeline. It is equivalent to a C# delegate, but without the rigorous type-checking for the parameter you pass.  With the poems, the filter didn’t change.  It  decided how many bottles we start with, or how many children in the bed. In this case having the filter code in a variable now allows us to place the actual filter to let us choose the database when we are running the script.  We might want to specify a ‘white’ list of databases that we want to operate on, or we might want to operate on all but a ‘black’ list of databases.  We might want to select only those that conform to a wildcard or regex string. 
+In our case, we’ll just insert a whitelist or a blacklist if one has been specified. Logically, you can’t specify a whitelist if you have a blacklist: it is one or the other, or neither.
+$DatabaseFilter=$TheDatabaseFilter
+if ($blacklist.count -gt 0) {$DatabaseFilter= { param($x); if ($blacklist -notcontains $x.name) {$x} }} 
+# followed by the ones you don't want, listed in your blacklist
+if ($whitelist.count -gt 0) {$DatabaseFilter= { param($x); if ($whitelist -contains $x.name) {$x} }} 
+# and one that just selects the files you specify in your whitelist
+
+If you then invoke this in the process part of  a scriptblock, it will filter out all the unwanted database objects as they appear, and only pass on the ones you want. 
+You may have already categorised your databases with special prefix such a ‘Test’.  In this case, you can  use a different  $Databasefilter filter  to get only these,
+{ param($x); if ($x.name -like ‘Adv*’){$x}}
+Or if you want to avoid them then 
+{ param($x); if ($x.name -notlike ‘Adv*’){$x}}
+You might want to just do part of a list of databases, specifying the start and end database, just like the poems. Who knows? You can also use blacklists or whitelists for the list of servers in your care, or your registered servers, if you prefer.
+Why do it this way? It is because you do not need to alter the code for the pipeline, you are ‘injecting’ your filter into it. You have your code in just one place, without duplication.  With a delegate we can specify the functionality, and therefore what actually happens, at script execution-time. You can have a different filter depending on the specific parameters . To do it using conventional conditional logic would end up with a rats nest of ‘if’ statements. One can, if necessary, be even cleverer and add as many tasks as you wish to perform once the database is selected, but we won’t  overdo things at this point. 
+So, we’ll create the pipeline as an ‘advanced’  function,  so that we can use help,  ‘debug-printing’ and ‘voluble’ messages for debugging.  We’ll save it in the same directory as all our code that actually does things.
+So, without actually doing anything harmful to any database, lets  test it out. Yes, we can even  test it out.
+. ".\ForAllDatabaseServers.ps1" # pull in our pipeline function 'Foreach-DatabaseInServers'
+$DataSources=@('Dave','Dee','Dosy','Beaky','Mitch','Titch') # server name and instance
+Foreach-DatabaseInServers $Datasources  #test that you can cannect to your datasources
+
+Once you’ve got this working to your satisfaction, and you’ve added any extra filters or other functionality you need and tested it, then you can start on the delegate $JobToDo.
+How about generating a build script for all the databases of your registered servers, that is saved to a directory corresponding to the server?  We just create a different $JobToDo, and the necessary global variable, and we substitute it for the default ‘$JobToDo’.  In this case, I want a blacklist because I don’t want to script things like Adventurewrks (In this example, I’ve taken out a lot of specific databases)
+Import-Module sqlps -DisableNameChecking #load the SQLPS functionality for getting the registered servers
+. ".\ForAllDatabaseServers.ps1" # pull in our pipeline function 'Foreach-DatabaseInServers'
+#now fetch the list of all our registered servers
+$servers= dir 'SQLSERVER:\sqlregistration\Database Engine Server Group' | foreach-object{$_.name}
+#and a list of the databases we don't want to be scripted
+$blacklist='Pubs','NorthWind','AdventureWorks','AdventureWorksDW','ReportServer','ReportServerTempDB' #the databases I don't want to do
+#where we want to store the scripts (each server/instance  a separate directory
+$Filepath='E:\MyScriptsDirectory' # local directory to save build-scripts to
+#and do it
+Foreach-DatabaseInServers -verbose $servers -blacklist $blacklist -jobToDo {param($database)
+   $directory="$($FilePath)\$( $database.Parent.URN.GetAttribute('Name','Server')  -replace  '[\\\/\:\.]','-' )";
+	$transfer = new-object ("$My.Transfer") $database
+	$CreationScriptOptions = new-object ("$My.ScriptingOptions") 
+	$CreationScriptOptions.ExtendedProperties= $true # yes, we want these
+	$CreationScriptOptions.DRIAll= $true # and all the constraints 
+	$CreationScriptOptions.Indexes= $true # Yup, these would be nice
+	$CreationScriptOptions.Triggers= $true # This should be included when scripting a database
+	$CreationScriptOptions.ScriptBatchTerminator = $true # this only goes to the file
+	$CreationScriptOptions.IncludeHeaders = $true; # of course
+	$CreationScriptOptions.ToFileOnly = $true #no need of string output as well
+	$CreationScriptOptions.IncludeIfNotExists = $true # not necessary but it means the script can be more versatile
+	$CreationScriptOptions.Filename = "$directory\$($Database.name)_Build.sql"; 
+	$transfer.options=$CreationScriptOptions # tell the transfer object of our preferences
+   write-verbose "scripting '$($database.name)' in server '$($database.parent.name)' to $($CreationScriptOptions.Filename)"
+   if (!(Test-Path -path "$directory"))
+      {
+		 Try { New-Item "$directory" -type directory | out-null }  
+	    Catch [system.exception]{
+		      Write-Error "error while creating '$directory'  "
+	         return
+	          }  
+      }
+   Try {$transfer.ScriptTransfer()}
+	    Catch [system.exception]{
+		      Write-Error "couldn't script to '$directory\$($Database.name)_Build.sql' because of error (possibly an encrypted stored procedure"
+	          }  
+   }
+'did that go well?' 
+That was pretty easy.  What about executing a SQL Script in a number of databases?  Right away, sir. We’ll write some files, one for each database, listing in CSV all the tables in each database that are heaps, without primary keys. You’ll see that it would be dead easy to use this for a variety of reports, just by changing the SQL, (and SQL Title).  I use this method for testing code on a variety of different databases, servers and collations. 
+Import-Module sqlps -DisableNameChecking #load the SQLPS functionality for getting the registered servers
+. ".\ForAllDatabaseServers.ps1" # pull in our pipeline function 'Foreach-DatabaseInServers'
+#now fetch the list of all our registered servers
+$servers= dir 'SQLSERVER:\sqlregistration\Database Engine Server Group' | foreach-object{$_.name}
+$Filepath='E:\MyScriptsDirectory' # local directory to save the reports to
+$SQLTitle='All_Heaps_In_'
+$SQL=@'
+--Which of my tables don't have primary keys?
+SELECT @@Servername as [Server],DB_NAME() as [Database], --we'll do it via information_Schema
+  TheTables.Table_Catalog+'.'+TheTables.Table_Schema+'.'
+                        +TheTables.Table_Name AS [tables without primary keys]
+FROM
+  INFORMATION_SCHEMA.TABLES TheTables
+  LEFT OUTER JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS TheConstraints
+    ON TheTables.table_Schema=TheConstraints.table_schema
+       AND TheTables.table_name=TheConstraints.table_name
+       AND constraint_type='PRIMARY KEY'
+WHERE table_Type='BASE TABLE'
+  AND constraint_name IS NULL
+ORDER BY [tables without primary keys]
+'@
+
+<#So, we can make it call some sql and get back a result. In this case we are only looking at the various AdventureWorks databases in all the servers, just to illustrate the different filters you can specify.#>
+Foreach-DatabaseInServers $servers -TheDatabasefilter { param($x); if ($x.name -like ‘Adv*’){$x}}  -jobToDo {
+   param($database)
+
+ 	$databaseName=$database.name
+	$ServerName=$database.Parent.Name
+   $directory="$($FilePath)\$($database.parent.name -replace  '[\\\/\:\.]','-' )";#create a directory
+   #and a handler for warnings and PRINT messages
+	$handler = [System.Data.SqlClient.SqlInfoMessageEventHandler] {param($sender, $event) Write-Host $event.Message};
+	$database.parent.ConnectionContext.add_InfoMessage($handler);
+	$result=$database.ExecuteWithResults("$SQL") #execute the SQL
+	$database.parent.ConnectionContext.remove_InfoMessage($handler);
+	if (!(Test-Path -path "$directory")) #create the directory if necessary
+	      {
+			 Try { New-Item "$directory" -type directory | out-null }  
+		    Catch [system.exception]{
+			      Write-Error "error while creating '$directory'  "
+		         return
+		          }  
+	      }
+<# you might want to save these in a central monitoring server, or put them all in one file, of course, but that is what powershell is all about #>
+	$result.Tables[0]| convertto-csv -NoTypeInformation >"$directory\$SQLTitle$databasename.csv"
+	}
+
+fine. Let’s do something slightly trickier. There is a  script that generates the source, one file per object, of the databases of your registered servers. Actually, as it stands, I’ve only included those databases that start with the word ‘Test’. I suspect you’ll want something slightly different.  I’ve put each server in its own directory, of which each database is in its own subdirectory. Each object type (e.g. TABLE) is in its own directory within this. From this, it is a mere bagatelle to pop these into source control.
+$DirectoryToSaveTo='E:\MyScriptsDirectory' # the directory where you want to store them
+$TheDatabasefilter = { param($x); if ($x.name -like ‘Test*’){$x}} # just those starting with 'Phil'.
+
+. ".\ForAllDatabaseServers.ps1" # pull in our pipeline function 'Foreach-DatabaseInServers'
+Import-Module sqlps -DisableNameChecking #load the SQLPS functionality for getting the registered servers
+#get a list of the servers we want to scan
+$servers= dir 'SQLSERVER:\sqlregistration\Database Engine Server Group' | foreach-object{$_.name}
+
+$ServiceBrokerTypes=@( 'MessageType','ServiceBroker','ServiceContract','ServiceQueue','ServiceRoute','RemoteServiceBinding')
+
+$JobToDo= {
+   $database=$_ 
+	$databaseName=$_.name
+	$ServerName=$_.Parent.URN.GetAttribute('Name','Server')
+	write-verbose "scripting $databasename in $serverName"
+	$ScriptOptions = new-object ("Microsoft.SqlServer.Management.Smo.ScriptingOptions")
+	$ScriptOptions.ExtendedProperties= $true # yes, we want these
+	$ScriptOptions.DRIAll= $true # and all the constraints
+	$ScriptOptions.Indexes= $true # Yup, these would be nice
+	$ScriptOptions.ScriptBatchTerminator = $true # this only goes to the file
+	$ScriptOptions.IncludeHeaders = $true; # of course
+	$ScriptOptions.ToFileOnly = $true # no need of string output as well
+	$ScriptOptions.IncludeIfNotExists = $true # not necessary but makes script more versatile
+   $scrp=new-object ("$My.Scripter") $Database.parent
+	$scrp.options=$ScriptOptions
+   $database.EnumObjects([long]0x1FFFFFFF -band [Microsoft.SqlServer.Management.Smo.DatabaseObjectTypes]::all) | `
+      Where-Object {('sys','information_schema') -notcontains $_.Schema} | Foreach-Object { 
+   $urn=	[Microsoft.SqlServer.Management.Sdk.Sfc.Urn] $_.URN	
+	if (('ExtendedStoredProcedure','ServiceBroker') -notcontains $urn.type)
+	   {
+		$currentPath="$DirectoryToSaveTo\$($ServerName -replace  '[\\\/\:\.]','-' )\$($urn.GetAttribute('Name','Database') -replace  '[\\\/\:\.]','-')"
+		if ( $ServiceBrokerTypes -contains $urn.type)
+				{$fullPath="$currentPath\ServiceBroker\$($urn.type)"}
+	   else
+				{$fullPath="$currentPath\$($urn.type)"}
+	
+	   if (!(Test-Path -path $fullPath ))
+	      {
+			Try { New-Item $fullPath -type directory | out-null }  
+			Catch [system.exception]{
+				  Write-Error "error while creating '$fullPath' "
+			     return
+			    }  
+	      }
+		 $scrp.options.FileName = "$fullPath\$($urn.GetAttribute('Schema')-replace  '[\\\/\:\.]','-')-$($urn.GetAttribute('Name') -replace  '[\\\/\:\.]','-').sql"
+	    $UrnCollection = new-object ('Microsoft.SqlServer.Management.Smo.urnCollection')
+	    $URNCollection.add($urn)
+		 write-verbose "writing script to $($scrp.options.FileName)"
+	    $scrp.Script($URNCollection)
+		}
+   }
+     
+}
+
+$params = @{DataSources=$Servers;TheDatabaseFilter=$TheDatabasefilter;JobToDo=$JobToDo;verbose=$true}
+Foreach-DatabaseInServers @Params
+"done them, Master."
+
+So there you have it; a simple pipeline for serving up whatever databases you specify, into which you can inject whatever functionality you need. Your requirements might be different. Your servers could be outside the windows domain and therefore accessible only by SQL Server credentials. You may need  to specify a process to be done at the sever level as well as the database level.  
