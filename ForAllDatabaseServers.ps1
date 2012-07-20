@@ -39,11 +39,7 @@ Function Foreach-DatabaseInServers {
         [Parameter(Mandatory=$false,
  						 Position=1,
                    HelpMessage='The actual job you want to do in each database')]
-        [scriptblock]$JobToDo ={param($database)
-			 	$databaseName=$database.name
-				$ServerName=$database.Parent.Name
-				"Do clever things with $databasename on $Servername"
-	},
+        [scriptblock]$JobToDo ={ param($x); $x},
          # The WhiteList
         [Parameter(Mandatory=$false,
  						 Position=2,
@@ -98,8 +94,8 @@ $DataSources | # our list of servers
       Foreach-object {$_.Databases } | #for every server successfully reached 
          Where-Object {$_.IsSystemObject -ne $true} | #not the system objects
             & {PROCESS{$DatabaseFilter.invoke($_)}}  | # do all,avoid blacklist or do a whitelist etc
-              & {PROCESS{$JobToDo.invoke($_)}} #and do whatever you want for the database
-}
+              & {PROCESS{$JobToDo.invoke($_)}}  #and do whatever you want for the database
+}					
 
 
 
